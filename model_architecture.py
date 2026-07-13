@@ -22,7 +22,9 @@ WHAT ELSE IS IN THE CHECKPOINT (all plain Python values, not model code)
 -------------------------------------------------------------------------
     ckpt["arch"]       -> "resnet_small" (confirms which architecture to use)
     ckpt["target"]      -> "UnifiedQualityScore.native" (the OFIQ column it predicts)
-    ckpt["img_size"]    -> 224 (resize input images to this before feeding them in)
+    ckpt["img_size"]    -> 256 (resize input images to this before feeding them in;
+                           FFHQ's native resolution -- earlier checkpoints used 224,
+                           a downsampled size, until this was corrected)
     ckpt["epoch"]       -> 40 (the final epoch trained; the checkpoint is always saved
                            from the last epoch actually run, not from whichever epoch
                            had the lowest validation MSE -- see train_quality.py's
@@ -110,7 +112,7 @@ class SmallResNet(nn.Module):
         super().__init__()
         w0, w1, w2, w3 = widths
         self.stem = nn.Sequential(
-            nn.Conv2d(3, w0, 3, stride=2, padding=1, bias=False),  # 224 -> 112
+            nn.Conv2d(3, w0, 3, stride=2, padding=1, bias=False),  # e.g. 256 -> 128 (any input size halves; AdaptiveAvgPool2d in the head makes the whole network resolution-agnostic)
             nn.BatchNorm2d(w0),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),  # 112 -> 56

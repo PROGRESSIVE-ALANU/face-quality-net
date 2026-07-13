@@ -19,13 +19,16 @@ Why train on UnifiedQualityScore.native (not .scalar)?
   TRAIN split's range only (stored in the checkpoint) so the model -> score
   mapping is exact and works for ANY target column, whatever its range.
 
-Anti-overfitting toolbox (all on by default, tune via flags):
+Anti-overfitting toolbox (on by default unless noted, tune via flags):
   - spatial dropout (Dropout2d) inside the conv stack
   - SE (Squeeze-and-Excitation) channel attention in every conv block
   - weight decay (L2) via AdamW
-  - data augmentation (random crop / flip / colour jitter)
+  - data augmentation (flip / colour jitter / rotation -- NOT random crop:
+    removed per Spencer Giddens, since OFIQ's score depends on the whole
+    image, so cropping mismatches the label with what the model sees)
   - a deliberately SMALL ResNet (resnet_small) as an alternative to resnet18
-  - early stopping on val MAE
+  - early stopping on val MSE, OFF by default (--patience 0); available via
+    --patience N but wasn't measurably helping on this data
   - gradient clipping (--grad-clip 1.0) to prevent training spikes
   - combined MSE + Pearson-correlation loss (--loss combined) to directly
     optimise the correlation metrics the evaluator measures
@@ -179,15 +182,15 @@ class SmallResNet(nn.Module):
         super().__init__()
         w0, w1, w2, w3 = widths
         self.stem = nn.Sequential(
-            nn.Conv2d(3, w0, 3, stride=2, padding=1, bias=False),  # 224 -> 112
+            nn.Conv2d(3, w0, 3, stride=2, padding=1, bias=False),  # e.g. 256 -> 128
             nn.BatchNorm2d(w0),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 112 -> 56
+            nn.MaxPool2d(2),  # 128 -> 64
         )
-        self.layer1 = BasicBlock(w0, w0, stride=1, drop=drop)  # 56
-        self.layer2 = BasicBlock(w0, w1, stride=2, drop=drop)  # 56 -> 28
-        self.layer3 = BasicBlock(w1, w2, stride=2, drop=drop)  # 28 -> 14
-        self.layer4 = BasicBlock(w2, w3, stride=2, drop=drop)  # 14 -> 7
+        self.layer1 = BasicBlock(w0, w0, stride=1, drop=drop)  # 64
+        self.layer2 = BasicBlock(w0, w1, stride=2, drop=drop)  # 64 -> 32
+        self.layer3 = BasicBlock(w1, w2, stride=2, drop=drop)  # 32 -> 16
+        self.layer4 = BasicBlock(w2, w3, stride=2, drop=drop)  # 16 -> 8 (AdaptiveAvgPool2d makes any input size work)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.head = nn.Sequential(
             nn.Flatten(),
@@ -352,6 +355,11 @@ def diagnose_overfitting(log_rows, span, requested_epochs=None, patience=None):
     print("-------------------------------------------------------\n", flush=True)
 
 
+# ============================================================ #
+# NOTE: train_curve_full.png is made right here. Called from    #
+# main() near the end of training (search "plot_curves(log_rows"#
+# below to see the call site).                                  #
+# ============================================================ #
 def plot_curves(log_rows, path, requested_epochs=None, patience=None):
     """Plot the TRAINING curves: train vs val MSE and MAE per epoch.
 
@@ -424,9 +432,20 @@ def main():
                     help="override head dropout (>=0); -1 uses the arch default")
     ap.add_argument("--augment", default="strong", choices=["none", "basic", "strong"],
                     help="train-time data augmentation strength")
-    ap.add_argument("--patience", type=int, default=8,
-                    help="early-stop after this many epochs with no val-MAE gain (0=off)")
-    ap.add_argument("--img-size", type=int, default=224)
+    # NOTE: default is 0 (off), per Spencer Giddens: early stopping wasn't
+    # measurably helping or hurting on this data, so the simplest thing is
+    # to just run the full requested epoch count every time. Still
+    # available via --patience N if ever wanted again.
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early-stop after this many epochs with no val-MSE gain (0=off, default)")
+    # NOTE: default is FFHQ's native resolution -- no downsampling unless
+    # someone explicitly asks for a smaller size. No fallback to 224 exists
+    # anywhere in this file; 224 only appears in SimpleCNN's dimension
+    # comments (an unused arch) and in the resnet18-only ImageNet norm
+    # constants, neither of which affects resnet_small (the arch actually
+    # trained). Confirmed independently in best_model_full.pt's own
+    # metadata: img_size=256.
+    ap.add_argument("--img-size", type=int, default=256)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
@@ -492,15 +511,34 @@ def main():
     print(f"Saved val split -> {split_path}", flush=True)
 
     if args.arch == "resnet18":
+        # NOTE: the "0.224" here is an ImageNet color-channel normalization
+        # constant, NOT a resolution value -- coincidence of digits only.
+        # This branch is also unused for best_model_full.pt (trained with
+        # arch=resnet_small, which uses the else branch below).
         norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     else:
         norm = transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 
+    # ==================================================================== #
+    # NOTE: this is where image resizing actually happens. Every           #
+    # transforms.Resize/RandomResizedCrop below uses args.img_size, which  #
+    # defaults to 256 (see the argparse declaration above) and is also     #
+    # passed explicitly as --img-size 256 in JOB_train_quality_full.sh --  #
+    # both agree, so there is no fallback path that silently uses 224.     #
+    # ==================================================================== #
     # ---- data augmentation: more variety in training = less overfitting ---- #
     aug = []
     if args.augment == "strong":
         aug = [
-            transforms.RandomResizedCrop(args.img_size, scale=(0.8, 1.0)),
+            # RandomResizedCrop(scale=(0.8, 1.0)) removed per Spencer Giddens:
+            # OFIQ's score depends on the WHOLE image (full face + background),
+            # so randomly cropping out part of the image before feeding it to
+            # the model leaves the ground-truth label unchanged but shows the
+            # model less than the label was actually computed from -- a
+            # mismatch that could teach the model wrong patterns. Replaced
+            # with a plain Resize so the image still ends up at args.img_size,
+            # just without the random crop.
+            transforms.Resize((args.img_size, args.img_size)),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(0.2, 0.2, 0.2, 0.05),
             transforms.RandomRotation(10),

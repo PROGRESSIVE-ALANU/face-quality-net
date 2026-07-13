@@ -37,6 +37,20 @@ from torchvision import transforms
 from train_quality import FFHQQualityDataset, build_model
 
 
+# ============================================================ #
+# NOTE: this is where preds/trues actually get computed -- it   #
+# loads images (via FFHQQualityDataset, imported from            #
+# train_quality.py), runs them through the model (dropout is    #
+# off because main() already called model.eval() before this),  #
+# and un-scales the output back to native OFIQ units.            #
+# It's called twice in main() below: once on val_df (produces    #
+# eval_scatter_full.png's numbers) and once on a 7000-image      #
+# training sample (produces eval_scatter_full_train.png's).      #
+# The resize transform `tf` passed in is built a few lines above #
+# the first call, using img_size = ckpt["img_size"] (256) --     #
+# so THIS is the resolution actually used at inference time,     #
+# read straight from the checkpoint, not from any default.       #
+# ============================================================ #
 def run_model(model, df, root, target_col, tf, lo, hi, device, batch_size, workers):
     """Run the model over a dataframe; return (preds, trues) in NATIVE units."""
     ds = FFHQQualityDataset(df, root, target_col, tf, lo, hi)
@@ -70,6 +84,14 @@ def metrics(preds, trues):
                 r2=r2, baseline_mae=baseline_mae)
 
 
+# ============================================================ #
+# NOTE: both eval_scatter_full.png and eval_scatter_full_train.png
+# are made by this one function, called twice below (search
+# "scatter(trues" for the validation call, "scatter(tt" for train).
+# The trues/preds arrays it plots come from run_model() above --
+# see the NOTE on that function for where those numbers actually
+# come from.
+# ============================================================ #
 def scatter(trues, preds, m, path, title):
     try:
         import matplotlib

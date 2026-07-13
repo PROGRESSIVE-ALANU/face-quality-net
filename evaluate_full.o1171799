@@ -1,0 +1,38 @@
+Loading CRC_default/1.1
+Loading CRC_default/1.1
+index, name, memory.total [MiB]
+0, NVIDIA A10, 23028 MiB
+Loaded best_model_full.pt: arch=resnet_small target=UnifiedQualityScore.native img_size=256 scale=(10.108,34.381) (trained to epoch 40)
+Using saved val split (7000 val / 63000 train) -> clean, no leakage.
+
+================ EVALUATION (held-out val) ================
+  images evaluated : 7000
+  MAE              :   1.30   (lower better, native units)
+  baseline MAE     :   2.68   (always-guess-mean; beat this!)
+  RMSE             :   1.63
+  Pearson r        :  0.871        (1.0 = perfect linear)
+  Spearman rho     :  0.872        (ranking quality; the key one)
+  R^2              :  0.749        (1.0 = explains all variance)
+===========================================================
+
+Filename                        TRUE    PRED     err
+ffhq_all/49936.png              23.3    23.7    +0.4
+ffhq_all/04591.png              22.4    22.8    +0.3
+ffhq_all/10849.png              26.0    23.7    -2.3
+ffhq_all/17289.png              17.3    19.1    +1.8
+ffhq_all/64087.png              18.8    19.2    +0.4
+ffhq_all/57157.png              19.2    23.3    +4.1
+ffhq_all/50969.png              21.3    21.0    -0.3
+ffhq_all/44661.png              24.5    24.5    -0.1
+ffhq_all/38253.png              21.1    18.8    -2.2
+ffhq_all/31335.png              25.0    24.0    -1.0
+ffhq_all/25036.png              27.3    25.1    -2.2
+ffhq_all/41869.png              30.1    26.9    -3.2
+Scatter plot saved -> eval_scatter_full.png
+
+---- TRAINING-set fit (for comparison; expect it to look better) ----
+  train MAE 1.22  vs  val MAE 1.30   (big gap => overfitting)
+  train r   0.887  vs  val r   0.871
+Scatter plot saved -> eval_scatter_full_train.png
+Evaluation finished at: Fri Jul 10 12:24:24 AM EDT 2026
+Loading CRC_default/1.1

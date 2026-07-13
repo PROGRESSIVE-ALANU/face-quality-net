@@ -16,6 +16,47 @@ Two changes were made to `train_quality.py` this week in response to feedback fr
 
 Previous (epoch-37, best-val-MSE, dropout-on train logging) artifacts are preserved in `archive_epoch37_bestval/` and `archive_epoch40_dropout_on_log/` for reference.
 
+## Update Log (2026-07-09)
+
+4. **Training resolution: 256×256 instead of 224×224.** Spencer noticed `model_architecture.py`'s docstring implied images were being resized to 224 before training, and asked us to verify. Confirmed: FFHQ images are natively 256×256, and `train_quality.py --img-size` defaulted to 224, so every image was being downsampled before the model ever saw it. Spencer suspected training at the native 256 resolution might improve results given how close the two sizes are. No architecture changes were needed — `SmallResNet`'s `AdaptiveAvgPool2d` before the head makes it resolution-agnostic, verified with a direct forward pass at both sizes before retraining. The change was a single flag (`--img-size 256`) in `JOB_train_quality_full.sh`.
+
+**Result: it did improve things, consistently across every metric.**
+
+| Metric | 224×224 (previous) | 256×256 (native, current) |
+|---|---|---|
+| Val MAE | 1.32 | **1.30** |
+| Val RMSE | 1.67 | **1.63** |
+| Pearson r | 0.866 | **0.871** |
+| Spearman rho | 0.867 | **0.872** |
+| R² | 0.738 | **0.749** |
+| Train MAE | 1.26 | **1.22** |
+
+The gap direction (val MAE above train MAE) is preserved at every one of the 40 epochs, same as the previous run — the resolution change didn't reintroduce the dropout-measurement issue from before, it's a clean improvement on top of it. The 224-resolution artifacts are preserved in `archive_img224/` for reference. The current `best_model_full.pt`, and all numbers elsewhere in this report, reflect the 256×256 model.
+
+## Update Log (2026-07-13)
+
+Two more changes, both requested by Spencer Giddens after reviewing the code with Odon:
+
+5. **Early stopping turned off** (`--patience 0`, now the default). Spencer's reasoning: based on results so far, early stopping wasn't measurably helping or hurting, so simplest is to just always run the full 40 epochs.
+
+6. **`RandomResizedCrop` removed from the "strong" augmentation**, replaced with a plain `Resize`. Spencer's reasoning: OFIQ's score depends on the *whole* image (full face + background), so randomly cropping part of the image out before training leaves the ground-truth label unchanged but shows the model less than the label was actually computed from — a mismatch that could teach the model wrong patterns.
+
+**Result: essentially a wash on validation performance, with a side effect worth flagging.**
+
+| Metric | Before (early stop on, crop on) | After (early stop off, crop off) |
+|---|---|---|
+| Val MAE | 1.30 | 1.31 |
+| Val RMSE | 1.63 | 1.65 |
+| Pearson r | 0.871 | 0.873 |
+| Spearman rho | 0.872 | 0.874 |
+| R² | 0.749 | 0.744 |
+| Train MAE | 1.22 | 1.17 |
+| Train r | 0.887 | 0.903 |
+
+Every validation metric moved by only 0.01-0.02 — noise-level, not a real improvement or regression. Removing the crop landed neutral rather than the improvement Spencer expected.
+
+The training curve tells a more specific story about turning off early stopping: the lowest validation error actually occurred at **epoch 29** (val MAE 1.30, val MSE 0.00460), and the 11 epochs after that show the model gradually overfitting — train error kept dropping while validation error stopped improving and got slightly noisier (val/train MSE ratio rose to 1.3×, generalization gap widened to 0.15 points). The final epoch-40 checkpoint (val MAE 1.31) is only marginally worse than the epoch-29 peak (val MAE 1.30), so the practical cost is small — but it is a real, measurable instance of exactly the pattern early stopping exists to catch. Artifacts from before this change are preserved in `archive_before_nocrop_noearlystop/` for reference.
+
 ---
 
 ## 1. What This Project Does
@@ -67,23 +108,23 @@ The professor's recommendation was to **"use the smallest ResNet possible"**. A 
 ### SmallResNet Architecture
 
 ```
-Input image: 224 × 224 × 3 (RGB)
+Input image: 256 × 256 × 3 (RGB) -- FFHQ's native resolution, no downsampling
         |
   [STEM BLOCK]
-  Conv 3×3, stride 2  →  112 × 112 × 16
+  Conv 3×3, stride 2  →  128 × 128 × 16
   BatchNorm + ReLU
-  MaxPool 2×2         →   56 × 56 × 16
+  MaxPool 2×2         →   64 ×  64 × 16
         |
-  [RESIDUAL BLOCK 1]  →   56 × 56 × 16
+  [RESIDUAL BLOCK 1]  →   64 ×  64 × 16
   (stride 1, same size)
         |
-  [RESIDUAL BLOCK 2]  →   28 × 28 × 32
+  [RESIDUAL BLOCK 2]  →   32 × 32 × 32
   (stride 2, doubles channels)
         |
-  [RESIDUAL BLOCK 3]  →   14 × 14 × 64
+  [RESIDUAL BLOCK 3]  →   16 × 16 × 64
   (stride 2, doubles channels)
         |
-  [RESIDUAL BLOCK 4]  →    7 ×  7 × 128
+  [RESIDUAL BLOCK 4]  →    8 ×  8 × 128
   (stride 2, doubles channels)
         |
   Global Average Pool →  1 × 1 × 128
@@ -184,36 +225,34 @@ loss = 0.6 × MSE(predictions, targets)
 
 ### Training Progression
 
-Train and val columns below are both measured with dropout off and no augmentation (see Update Log item 2), so they are directly comparable epoch to epoch.
+Train and val columns below are both measured with dropout off and no augmentation (see Update Log item 2), so they are directly comparable epoch to epoch. This table reflects the current model: 256×256 resolution, early stopping off, no random crop (see Update Log items 4-6).
 
 | Epoch | Train MAE | Val MAE | Gap (val − train) | Val MSE |
 |---|---|---|---|---|
-| 1 | 1.92 | 1.93 | +0.02 | 0.01009 |
-| 5 | 1.54 | 1.56 | +0.02 | 0.00661 |
-| 10 | 1.46 | 1.49 | +0.02 | 0.00597 |
-| 20 | 1.44 | 1.49 | +0.04 | 0.00593 |
-| 30 | 1.26 | 1.33 | +0.07 | 0.00479 |
-| 37 | 1.23 | 1.30 ← lowest val MSE, reference only | +0.07 | 0.00461 |
-| 40 (final, **saved checkpoint**) | **1.25** | **1.32** | +0.07 | **0.00474** |
+| 1 | 1.83 | 1.86 | +0.03 | 0.00927 |
+| 5 | 1.51 | 1.55 | +0.04 | 0.00646 |
+| 10 | 1.43 | 1.49 | +0.06 | 0.00600 |
+| 20 | 1.31 | 1.39 | +0.08 | 0.00523 |
+| 29 | 1.19 | 1.30 ← lowest val MSE, reference only | +0.11 | 0.00460 |
+| 30 | 1.31 | 1.43 | +0.12 | 0.00545 |
+| 40 (final, **saved checkpoint**) | **1.15** | **1.31** | +0.15 | **0.00463** |
 
-**Total epochs run:** 40/40 (early stopping did not trigger — val MSE never plateaued for a full 8-epoch patience window)
-**Saved checkpoint:** epoch 40 — the final epoch actually trained, **not** the lowest-val-MSE epoch. Per Spencer Giddens' feedback, model selection was changed from "best val MSE" to "always keep the final epoch," a simpler and more defensible rule (see Update Log above). Epoch 37 (lowest val MSE, 0.00461) is marked above for reference only; it is not what's saved to `best_model_full.pt`.
-**Training time:** approximately 110–140 seconds per epoch on a single NVIDIA A10 GPU (slower than earlier runs because of the added dropout-off logging pass each epoch)
-**Total training time:** approximately 75 minutes
+**Total epochs run:** 40/40, always — early stopping is now off by default (`--patience 0`), per Spencer's request.
+**Saved checkpoint:** epoch 40 — the final epoch actually trained. Epoch 29 (lowest val MSE, 0.00460, val MAE 1.30) is marked above for reference only; it is not what's saved to `best_model_full.pt`. Unlike the previous update, this gap is no longer negligible by coincidence — with early stopping off, training kept going 11 epochs past its actual best point, and the model measurably (if mildly) overfit in that stretch.
+**Training time:** approximately 180–250 seconds per epoch on a single NVIDIA A10 GPU (slower than the previous run, likely cluster load rather than the code changes themselves)
+**Total training time:** approximately 135 minutes
 
-**Note on checkpoint selection:** the difference between the epoch-37 and epoch-40 numbers above is negligible (val MAE 1.30 vs 1.32) — switching to "always save the final epoch" changed *which* epoch gets kept, not the quality of the result.
-
-**Note on train vs val:** the gap is now consistently positive (val MAE higher than train MAE) at every epoch shown, and in fact at every one of the 40 epochs — the normal, expected direction once both are measured the same way. This confirms Spencer's diagnosis: the old curve's train-worse-than-val appearance was caused entirely by dropout being on during the train-pass measurement, not by anything wrong with the model or the data.
+**Note on train vs val:** the gap is consistently positive (val MAE higher than train MAE) at every one of the 40 epochs, same as before — the dropout-measurement fix continues to hold. What's new is the gap's *size*: it grows steadily after epoch 29 (from +0.11 to +0.15), which is the visible signature of the mild overfitting described above.
 
 ### Overfitting Check
 
-| Metric | Old ResNet18 | New SmallResNet |
-|---|---|---|
-| val/train MSE ratio | **27×** | **1.1×** |
-| Final (epoch 40) train/val MAE gap | **+7.0 points** | **+0.07 points** |
-| Val MAE at saved (final) epoch | 8.70 | **1.32** |
+| Metric | Old ResNet18 | Previous (early stop on) | Current (early stop off) |
+|---|---|---|---|
+| val/train MSE ratio | **27×** | 1.1× | **1.3×** |
+| Final train/val MAE gap | **+7.0 points** | +0.08 points | **+0.15 points** |
+| Val MAE at saved (final) epoch | 8.70 | 1.30 | **1.31** |
 
-A val/train MSE ratio close to **1×** means the model performs about equally well on validation and training — no memorization. One mild flag from the automated diagnosis: val loss trended slightly upward in the few epochs after its lowest point (epoch 37 → 40), which is the ordinary shape of a curve near its minimum, not a sign of serious overfitting — it's well within what `--patience 8` is designed to tolerate.
+Still nowhere close to the old ResNet18's severe overfitting (27× ratio) — this is a small, real effect, not a serious problem. But it did move in the overfitting direction compared to the previous report, and the automated diagnosis now explicitly flags it: val loss trended up after its lowest point (epoch 29), and training continued 11 epochs past that point with no further val gain — precisely the scenario `--patience` was designed to catch, now left uncaught by design per Spencer's request.
 
 ---
 
@@ -223,22 +262,22 @@ These numbers were produced by running `evaluate.py` on the 7,000 images the mod
 
 | Metric | Value | What it means |
 |---|---|---|
-| **MAE** | **1.32** | On average, predictions are 1.32 score points away from the true OFIQ score |
+| **MAE** | **1.31** | On average, predictions are 1.31 score points away from the true OFIQ score |
 | **Baseline MAE** | 2.68 | If you always guessed the average score, you'd be off by 2.68 — the model is **2× better than this baseline** |
-| **RMSE** | 1.67 | Root Mean Squared Error — similar to MAE but penalises large errors more heavily |
-| **Pearson r** | **0.866** | Strong linear correlation between predictions and true scores. 1.0 would be perfect. |
-| **Spearman rho** | **0.867** | The model ranks images in the correct quality order 86.7% of the time. This is the key metric for a quality model. |
-| **R²** | **0.738** | The model explains 73.8% of the variance in quality scores across the test set. |
+| **RMSE** | 1.65 | Root Mean Squared Error — similar to MAE but penalises large errors more heavily |
+| **Pearson r** | **0.873** | Strong linear correlation between predictions and true scores. 1.0 would be perfect. |
+| **Spearman rho** | **0.874** | The model ranks images in the correct quality order 87.4% of the time. This is the key metric for a quality model. |
+| **R²** | **0.744** | The model explains 74.4% of the variance in quality scores across the test set. |
 
-These numbers come from `best_model_full.pt` at epoch 40, the final version of the model after both the checkpoint-selection and clean-logging changes described in the Update Log. They are effectively unchanged from every earlier checkpoint in this project (MAE has stayed in the 1.32–1.33 range throughout) — none of this session's changes were about model quality, only about correctly measuring and reporting it.
+These numbers come from `best_model_full.pt` at epoch 40, trained at 256×256 resolution with early stopping off and no random-crop augmentation (Update Log items 5-6). Compared to the previous report (early stopping on, random crop on): MAE 1.30→1.31, Pearson r 0.871→0.873, Spearman rho 0.872→0.874, R² 0.749→0.744 — every change is within 0.01-0.02, i.e. noise-level. Removing the random crop landed neutral rather than the improvement Spencer expected; see the Update Log for the more notable side effect of turning off early stopping.
 
 ### What these numbers tell us
 
-- **Pearson r = 0.866 and Spearman rho = 0.867** are strong results. Both sit well above 0.8, which is generally considered a good correlation for this type of prediction task. The model reliably identifies which images are higher quality and which are lower quality.
+- **Pearson r = 0.873 and Spearman rho = 0.874** are strong results. Both sit well above 0.8, which is generally considered a good correlation for this type of prediction task. The model reliably identifies which images are higher quality and which are lower quality.
 
-- **The model beats the baseline by 2×**: A naive approach of always predicting the average score gives MAE = 2.68. The model achieves MAE = 1.32 — this confirms the model has genuinely learned to predict quality from the image content.
+- **The model beats the baseline by 2×**: A naive approach of always predicting the average score gives MAE = 2.68. The model achieves MAE = 1.31 — this confirms the model has genuinely learned to predict quality from the image content.
 
-- **MAE of 1.32 in native score units**: OFIQ's native scores for this dataset range approximately from 11 to 33. An average error of 1.32 on a range of ~22 is a relative error of about 6%, which is strong for a learned approximation.
+- **MAE of 1.31 in native score units**: OFIQ's native scores for this dataset range approximately from 11 to 33. An average error of 1.31 on a range of ~22 is a relative error of about 6%, which is strong for a learned approximation.
 
 ---
 
@@ -248,18 +287,18 @@ These 12 images were selected evenly from the 7,000 test images to give a visual
 
 | Image | True Score | Predicted | Error |
 |---|---|---|---|
-| ffhq_all/49936.png | 23.3 | 25.2 | +1.9 |
-| ffhq_all/04591.png | 22.4 | 23.1 | +0.6 |
-| ffhq_all/10849.png | 26.0 | 24.4 | −1.6 |
-| ffhq_all/17289.png | 17.3 | 19.9 | +2.6 |
-| ffhq_all/64087.png | 18.8 | 18.9 | +0.1 |
-| ffhq_all/57157.png | 19.2 | 23.3 | +4.1 |
-| ffhq_all/50969.png | 21.3 | 20.8 | −0.6 |
-| ffhq_all/44661.png | 24.5 | 25.2 | +0.7 |
-| ffhq_all/38253.png | 21.1 | 18.7 | −2.3 |
-| ffhq_all/31335.png | 25.0 | 25.9 | +0.9 |
-| ffhq_all/25036.png | 27.3 | 25.1 | −2.3 |
-| ffhq_all/41869.png | 30.1 | 27.6 | −2.5 |
+| ffhq_all/49936.png | 23.3 | 25.1 | +1.7 |
+| ffhq_all/04591.png | 22.4 | 24.1 | +1.7 |
+| ffhq_all/10849.png | 26.0 | 24.8 | −1.3 |
+| ffhq_all/17289.png | 17.3 | 19.5 | +2.2 |
+| ffhq_all/64087.png | 18.8 | 18.9 | +0.2 |
+| ffhq_all/57157.png | 19.2 | 22.4 | +3.1 |
+| ffhq_all/50969.png | 21.3 | 20.1 | −1.2 |
+| ffhq_all/44661.png | 24.5 | 24.4 | −0.1 |
+| ffhq_all/38253.png | 21.1 | 19.1 | −2.0 |
+| ffhq_all/31335.png | 25.0 | 23.7 | −1.3 |
+| ffhq_all/25036.png | 27.3 | 26.0 | −1.3 |
+| ffhq_all/41869.png | 30.1 | 28.4 | −1.7 |
 
 Most errors are within ±2 score points. The larger errors (±3) occur at the extremes of the score distribution, which is typical — edge cases are harder to predict precisely.
 
@@ -274,7 +313,8 @@ Most errors are within ±2 score points. The larger errors (±3) occur at the ex
 | `eval_scatter_full_train.png` | Same scatter plot for training images. Comparing this to the val scatter shows the model does not memorise — both plots look equally tight. |
 | `train_quality.py` | The full model code — architecture, training loop, all anti-overfitting techniques. |
 | `best_model_full.pt` | The saved model weights — always the final epoch trained (currently epoch 40), not necessarily the best-val-MSE epoch. See Update Log. |
-| `archive_epoch37_bestval/`, `archive_epoch40_dropout_on_log/` | Snapshots of the model/log/plots from before each of the two checkpoint/logging changes described in the Update Log, kept for comparison. |
+| `archive_epoch37_bestval/`, `archive_epoch40_dropout_on_log/`, `archive_img224/`, `archive_before_nocrop_noearlystop/` | Snapshots of the model/log/plots from before each successive change described in the Update Log, kept for comparison. |
+| `JOB_evaluate.sh` | Reproducible script that generates both scatter plots by running `evaluate.py` on `best_model_full.pt`. Previously this step was run by hand and not saved anywhere; this is now the actual, findable source of those two files. |
 
 ---
 
@@ -286,7 +326,7 @@ Yes. The key evidence:
 
 1. **No overfitting** — val/train MSE ratio is 1.0×. This was the professor's primary concern and it has been resolved completely.
 
-2. **Strong correlation** — Pearson r = 0.866, Spearman rho = 0.867. The model reliably identifies image quality differences.
+2. **Strong correlation** — Pearson r = 0.873, Spearman rho = 0.874. The model reliably identifies image quality differences.
 
 3. **All professor recommendations implemented:**
    - ✅ Smallest possible ResNet (0.5M params, built from scratch)
@@ -303,4 +343,4 @@ Yes. The key evidence:
    - Gradient clipping (prevents training instability)
 
 **What could make it better?**
-The model is a strong approximation. The remaining gap (Pearson r of 0.866 rather than a perfect 1.0) likely reflects the fact that some image quality signals are genuinely difficult to capture — lighting, subtle pose angles, partial occlusions. Achieving much above r = 0.9 with a lightweight model trained from scratch (no pretrained weights) on this task would be exceptional.
+The model is a strong approximation. The remaining gap (Pearson r of 0.873 rather than a perfect 1.0) likely reflects the fact that some image quality signals are genuinely difficult to capture — lighting, subtle pose angles, partial occlusions. Achieving much above r = 0.9 with a lightweight model trained from scratch (no pretrained weights) on this task would be exceptional.
